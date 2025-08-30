@@ -615,7 +615,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
   function togglePassword() {
     const passField = document.getElementById("wifiPass");
     const toggleBtn = document.querySelector(".password-toggle");
-    if (passField.type === "password") { passField.type = "text"; toggleBtn.textContent = "🙈"; }
+    if (passField.type === "password") { passField.type = "text"; toggleBtn.textContent = "👁"; }
     else { passField.type = "password"; toggleBtn.textContent = "👁"; }
   }
 
