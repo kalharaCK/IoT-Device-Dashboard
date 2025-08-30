@@ -56,7 +56,7 @@ struct WifiConfig {
   bool load() {
     if (!SPIFFS.exists(WIFI_FILE)) return false;
     File f = SPIFFS.open(WIFI_FILE, "r"); if (!f) return false;
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     auto err = deserializeJson(doc, f); f.close();
     if (err) return false;
     staSsid = doc["staSsid"] | "";
@@ -66,7 +66,7 @@ struct WifiConfig {
     return true;
   }
   bool save() const {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     doc["staSsid"] = staSsid;
     doc["staPass"] = staPass;
     doc["apSsid"]  = apSsid.length() ? apSsid : DEFAULT_AP_SSID;
@@ -81,14 +81,14 @@ struct GsmConfig {
   bool load() {
     if (!SPIFFS.exists(GSM_FILE)) return false;
     File f = SPIFFS.open(GSM_FILE, "r"); if (!f) return false;
-    DynamicJsonDocument doc(512); if (deserializeJson(doc, f)) { f.close(); return false; }
+    DynamicJsonDocument doc(1024); if (deserializeJson(doc, f)) { f.close(); return false; }
     f.close();
     carrierName = doc["carrierName"] | ""; apn = doc["apn"] | "";
     apnUser = doc["apnUser"] | ""; apnPass = doc["apnPass"] | "";
     return true;
   }
   bool save() const {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     doc["carrierName"] = carrierName; doc["apn"] = apn;
     doc["apnUser"] = apnUser; doc["apnPass"] = apnPass;
     File f = SPIFFS.open(GSM_FILE, "w"); if (!f) return false;
@@ -101,13 +101,13 @@ struct UserConfig {
   bool load() {
     if (!SPIFFS.exists(USER_FILE)) return false;
     File f = SPIFFS.open(USER_FILE, "r"); if (!f) return false;
-    DynamicJsonDocument doc(512); if (deserializeJson(doc, f)) { f.close(); return false; }
+    DynamicJsonDocument doc(1024); if (deserializeJson(doc, f)) { f.close(); return false; }
     f.close();
     name = doc["name"] | ""; email = doc["email"] | ""; phone = doc["phone"] | "";
     return true;
   }
   bool save() const {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     doc["name"] = name; doc["email"] = email; doc["phone"] = phone;
     File f = SPIFFS.open(USER_FILE, "w"); if (!f) return false;
     serializeJson(doc, f); f.close(); return true;
@@ -148,11 +148,21 @@ String buildStatusJson() {
   ap["mac"]  = WiFi.softAPmacAddress();
 
   JsonObject sta = doc.createNestedObject("sta");
-  sta["ssid"]      = WiFi.SSID();
-  sta["connected"] = (WiFi.status() == WL_CONNECTED);
-  sta["ip"]        = ipToStr(WiFi.localIP());
-  sta["rssi"]      = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
+  bool staConnected = (WiFi.status() == WL_CONNECTED);
+  sta["ssid"]      = staConnected ? WiFi.SSID() : "";
+  sta["connected"] = staConnected;
+  sta["ip"]        = staConnected ? ipToStr(WiFi.localIP()) : "0.0.0.0";
+  sta["rssi"]      = staConnected ? WiFi.RSSI() : 0;
   sta["hostname"]  = WiFi.getHostname() ? WiFi.getHostname() : "";
+  
+  // Add connection status string for UI display
+  if (staConnected) {
+    sta["status"] = "Connected to " + WiFi.SSID();
+    sta["statusClass"] = "status-connected";
+  } else {
+    sta["status"] = "Not connected";
+    sta["statusClass"] = "status-disconnected";
+  }
 
   String out; serializeJson(doc, out); return out;
 }
@@ -185,10 +195,13 @@ void handleNotFound() {
 
 void setup() {
   Serial.begin(115200); delay(200);
+  Serial.println("Starting ESP32 Configuration Panel...");
 
   // Filesystem
   if (!SPIFFS.begin(true)) {
     Serial.println("SPIFFS mount failed");
+  } else {
+    Serial.println("SPIFFS mounted successfully");
   }
 
   // Load configs
@@ -198,7 +211,16 @@ void setup() {
   String apSsid = wifiCfg.apSsid.length() ? wifiCfg.apSsid : DEFAULT_AP_SSID;
   String apPass = wifiCfg.apPass.length() ? wifiCfg.apPass : DEFAULT_AP_PASS;
   startAP(apSsid, apPass);
-  connectSTA(wifiCfg.staSsid, wifiCfg.staPass);
+  
+  Serial.println("Access Point started:");
+  Serial.println("SSID: " + apSsid);
+  Serial.println("IP: " + ipToStr(WiFi.softAPIP()));
+  
+  // Try to connect to saved WiFi if available
+  if (wifiCfg.staSsid.length()) {
+    Serial.println("Attempting to connect to saved WiFi: " + wifiCfg.staSsid);
+    connectSTA(wifiCfg.staSsid, wifiCfg.staPass);
+  }
 
   // Routes ---------------------
   server.on("/", HTTP_GET, handleRoot);
@@ -217,8 +239,11 @@ void setup() {
 
   // ---- API: WiFi Scan
   server.on("/api/wifi/scan", HTTP_GET, []() {
+    Serial.println("Starting WiFi scan...");
     int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
-    DynamicJsonDocument doc(4096);
+    Serial.println("Found " + String(n) + " networks");
+    
+    DynamicJsonDocument doc(8192);
     // Deduplicate by SSID keeping best RSSI
     struct Row { String ssid; int rssi; int channel; wifi_auth_mode_t auth; };
     std::vector<Row> rows;
@@ -254,27 +279,52 @@ void setup() {
   // ---- API: WiFi Connect (save STA credentials + attempt connect)
   server.on("/api/wifi/connect", HTTP_POST, []() {
     if (!server.hasArg("plain")) { sendText(400, "Invalid JSON"); return; }
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     auto err = deserializeJson(doc, server.arg("plain"));
     if (err) { sendText(400, "Invalid JSON"); return; }
     String ssid = doc["ssid"] | "";
     String pass = doc["password"] | "";
     if (!ssid.length()) { sendText(400, "SSID required"); return; }
 
-    wifiCfg.staSsid = ssid; wifiCfg.staPass = pass; wifiCfg.save();
+    Serial.println("Attempting to connect to: " + ssid);
+    
+    // Save credentials first
+    wifiCfg.staSsid = ssid; 
+    wifiCfg.staPass = pass; 
+    wifiCfg.save();
 
-    WiFi.disconnect(true, true); delay(200);
+    // Disconnect from current network cleanly
+    WiFi.disconnect(true);
+    delay(1000);
+    
+    // Connect to new network
     connectSTA(ssid, pass);
 
-    // Wait up to ~10s
+    // Wait up to ~15s for connection
     unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) delay(250);
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
 
     DynamicJsonDocument resp(256);
     bool ok = (WiFi.status() == WL_CONNECTED);
     resp["success"] = ok;
-    resp["ip"]  = ipToStr(WiFi.localIP());
-    resp["ssid"]= WiFi.SSID();
+    
+    if (ok) {
+      resp["ip"]   = ipToStr(WiFi.localIP());
+      resp["ssid"] = WiFi.SSID();
+      resp["rssi"] = WiFi.RSSI();
+      Serial.println("Connected successfully!");
+      Serial.println("IP: " + ipToStr(WiFi.localIP()));
+    } else {
+      resp["ip"]   = "0.0.0.0";
+      resp["ssid"] = "";
+      resp["error"] = "Connection timeout or authentication failed";
+      Serial.println("Connection failed!");
+    }
+    
     String out; serializeJson(resp, out);
     sendJson(ok ? 200 : 500, out);
   });
@@ -282,15 +332,35 @@ void setup() {
 
   // ---- API: WiFi Disconnect
   server.on("/api/wifi/disconnect", HTTP_POST, []() {
-    WiFi.disconnect(true, true);
-    sendText(200, "OK");
+    Serial.println("Disconnecting from WiFi...");
+    
+    // Clear saved credentials
+    wifiCfg.staSsid = "";
+    wifiCfg.staPass = "";
+    wifiCfg.save();
+    
+    // Disconnect from WiFi
+    WiFi.disconnect(true);
+    delay(1000);
+    
+    // Ensure we're still in AP+STA mode for the web interface
+    WiFi.mode(WIFI_AP_STA);
+    
+    Serial.println("WiFi disconnected and credentials cleared");
+    
+    DynamicJsonDocument resp(256);
+    resp["success"] = true;
+    resp["message"] = "Disconnected from WiFi network";
+    
+    String out; serializeJson(resp, out);
+    sendJson(200, out);
   });
   server.on("/api/wifi/disconnect", HTTP_OPTIONS, handleOptions);
 
   // ---- API: Save GSM
   server.on("/api/save/gsm", HTTP_POST, []() {
     if (!server.hasArg("plain")) { sendText(400, "Invalid JSON"); return; }
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, server.arg("plain"))) { sendText(400, "Invalid JSON"); return; }
     gsmCfg.carrierName = doc["carrierName"] | "";
     gsmCfg.apn         = doc["apn"] | "";
@@ -303,7 +373,7 @@ void setup() {
 
   // ---- API: Load GSM
   server.on("/api/load/gsm", HTTP_GET, []() {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     doc["carrierName"] = gsmCfg.carrierName;
     doc["apn"]         = gsmCfg.apn;
     doc["apnUser"]     = gsmCfg.apnUser;
@@ -316,7 +386,7 @@ void setup() {
   // ---- API: Save USER
   server.on("/api/save/user", HTTP_POST, []() {
     if (!server.hasArg("plain")) { sendText(400, "Invalid JSON"); return; }
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, server.arg("plain"))) { sendText(400, "Invalid JSON"); return; }
     userCfg.name  = doc["name"]  | "";
     userCfg.email = doc["email"] | "";
@@ -328,7 +398,7 @@ void setup() {
 
   // ---- API: Load USER
   server.on("/api/load/user", HTTP_GET, []() {
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     doc["name"]  = userCfg.name;
     doc["email"] = userCfg.email;
     doc["phone"] = userCfg.phone;
@@ -340,7 +410,7 @@ void setup() {
   // ---- API: Save AP settings (optional)
   server.on("/api/save/wifi", HTTP_POST, []() {
     if (!server.hasArg("plain")) { sendText(400, "Invalid JSON"); return; }
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, server.arg("plain"))) { sendText(400, "Invalid JSON"); return; }
     String apSsid = doc["apSsid"] | wifiCfg.apSsid;
     String apPass = doc["apPass"] | wifiCfg.apPass;
@@ -362,9 +432,18 @@ void setup() {
   // Start server
   server.begin();
   Serial.println("[HTTP] server started");
+  Serial.println("Configuration panel available at: http://" + ipToStr(WiFi.softAPIP()));
 }
 
 void loop() {
   dnsServer.processNextRequest(); // captive portal DNS
   server.handleClient();          // HTTP
+  
+  // Optional: Print WiFi status periodically for debugging
+  static unsigned long lastStatusPrint = 0;
+  if (millis() - lastStatusPrint > 30000) { // Every 30 seconds
+    lastStatusPrint = millis();
+    Serial.println("Status - AP: " + ipToStr(WiFi.softAPIP()) + 
+                   ", STA: " + (WiFi.status() == WL_CONNECTED ? ipToStr(WiFi.localIP()) : "Not connected"));
+  }
 }

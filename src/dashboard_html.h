@@ -163,6 +163,10 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
       color: #ef4444;
     }
 
+    .status-warning {
+      color: #f59e0b;
+    }
+
     /* Form elements */
     .form-group {
       margin-bottom: 20px;
@@ -423,16 +427,24 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         <div class="card">
           <h3>Network Status</h3>
           <div class="status-row">
-            <span class="status-label">Connected IP</span>
-            <span class="status-value status-connected" id="ipAddress">192.168.4.1</span>
+            <span class="status-label">Access Point IP</span>
+            <span class="status-value" id="apAddress">192.168.4.1</span>
           </div>
           <div class="status-row">
-            <span class="status-label">Access Point</span>
-            <span class="status-value">ESP32-AccessPoint</span>
+            <span class="status-label">Access Point SSID</span>
+            <span class="status-value" id="apSSID">ESP32-AccessPoint</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">WiFi Station IP</span>
+            <span class="status-value" id="staAddress">Not connected</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">Connected Network</span>
+            <span class="status-value" id="connectedNetwork">None</span>
           </div>
           <div class="status-row">
             <span class="status-label">Internet Connection</span>
-            <span class="status-value status-disconnected">Not connected</span>
+            <span class="status-value" id="internetStatus">Not connected</span>
           </div>
         </div>
 
@@ -440,7 +452,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
           <h3>WiFi Configuration</h3>
           
           <div class="input-row">
-            <button class="btn-scan btn-full" onclick="scanWifi()">Scan Networks</button>
+            <button class="btn-scan btn-full" onclick="scanWifi()" id="scanButton">Scan Networks</button>
           </div>
 
           <div class="form-group">
@@ -464,7 +476,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
           <div class="button-group">
             <div class="button-row">
               <button class="btn-primary btn-full" onclick="connectNetwork()" disabled id="connectBtn">Connect Network</button>
-              <button class="btn-danger btn-full" onclick="disconnectNetwork()">Disconnect</button>
+              <button class="btn-danger btn-full" onclick="disconnectNetwork()" id="disconnectBtn">Disconnect</button>
             </div>
           </div>
         </div>
@@ -611,39 +623,80 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
   async function refreshStatus() {
     try {
       const st = await apiGet('/api/status');
-      // Network Status card
-      document.getElementById('ipAddress').textContent = st.ap?.ip || '—';
-      const apRow = document.querySelector('.status-row:nth-child(2) .status-value');
-      if (apRow) apRow.textContent = st.ap?.ssid || '—';
+      console.log('Status response:', st);
+      
+      // Update Access Point info
+      document.getElementById('apAddress').textContent = st.ap?.ip || '—';
+      document.getElementById('apSSID').textContent = st.ap?.ssid || '—';
 
-      const internetEl = document.querySelector('.status-row:nth-child(3) .status-value');
-      if (st.sta?.connected) {
-        internetEl.textContent = 'Connected';
-        internetEl.className = 'status-value status-connected';
+      // Update Station info
+      const staConnected = st.sta?.connected || false;
+      const staIP = st.sta?.ip || '0.0.0.0';
+      const staSSID = st.sta?.ssid || '';
+      
+      // Station IP
+      const staAddressEl = document.getElementById('staAddress');
+      if (staConnected && staIP !== '0.0.0.0') {
+        staAddressEl.textContent = staIP;
+        staAddressEl.className = 'status-value status-connected';
       } else {
-        internetEl.textContent = 'Not connected';
-        internetEl.className = 'status-value status-disconnected';
+        staAddressEl.textContent = 'Not connected';
+        staAddressEl.className = 'status-value status-disconnected';
       }
+      
+      // Connected Network
+      const connectedNetworkEl = document.getElementById('connectedNetwork');
+      if (staConnected && staSSID) {
+        connectedNetworkEl.textContent = staSSID;
+        connectedNetworkEl.className = 'status-value status-connected';
+      } else {
+        connectedNetworkEl.textContent = 'None';
+        connectedNetworkEl.className = 'status-value status-disconnected';
+      }
+      
+      // Internet status (same as station status for now)
+      const internetStatusEl = document.getElementById('internetStatus');
+      if (staConnected) {
+        internetStatusEl.textContent = 'Connected';
+        internetStatusEl.className = 'status-value status-connected';
+      } else {
+        internetStatusEl.textContent = 'Not connected';
+        internetStatusEl.className = 'status-value status-disconnected';
+      }
+      
     } catch (e) {
       console.warn('Status error', e);
+      // Set error state
+      document.getElementById('apAddress').textContent = 'Error';
+      document.getElementById('apSSID').textContent = 'Error';
+      document.getElementById('staAddress').textContent = 'Error';
+      document.getElementById('connectedNetwork').textContent = 'Error';
+      document.getElementById('internetStatus').textContent = 'Error';
     }
   }
 
   // ---------- Scan WiFi ----------
   async function scanWifi() {
-    const button = event.target;
+    const button = document.getElementById('scanButton');
     const networkSelect = document.getElementById('networkSelect');
     const signalIndicator = document.getElementById('signalIndicator');
     const wifiPass = document.getElementById('wifiPass');
     const connectBtn = document.getElementById('connectBtn');
 
-    button.classList.add('loading'); button.textContent = 'Scanning...'; button.disabled = true;
-    networkSelect.disabled = true; wifiPass.disabled = true; connectBtn.disabled = true;
-    wifiPass.value = ''; signalIndicator.style.display = 'none';
+    button.classList.add('loading'); 
+    button.textContent = 'Scanning...'; 
+    button.disabled = true;
+    networkSelect.disabled = true; 
+    wifiPass.disabled = true; 
+    connectBtn.disabled = true;
+    wifiPass.value = ''; 
+    signalIndicator.style.display = 'none';
     networkSelect.innerHTML = '<option value="">Scanning for networks...</option>';
 
     try {
       const scan = await apiGet('/api/wifi/scan');
+      console.log('Scan results:', scan);
+      
       // De-duplicate by SSID, keep best RSSI
       const best = {};
       scan.forEach(n => {
@@ -660,12 +713,17 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         opt.textContent = `${n.ssid} (${sec})`;
         networkSelect.appendChild(opt);
       });
+      
+      console.log('Found networks:', availableNetworks.length);
     } catch (e) {
       alert('Scan failed: ' + e.message);
       networkSelect.innerHTML = '<option value="">Scan failed</option>';
+      console.error('Scan error:', e);
     } finally {
       networkSelect.disabled = false;
-      button.classList.remove('loading'); button.textContent = 'Scan Networks'; button.disabled = false;
+      button.classList.remove('loading'); 
+      button.textContent = 'Scan Networks'; 
+      button.disabled = false;
     }
   }
 
@@ -700,34 +758,62 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
     if ((selectedNetworkData.security !== 'Open') && !wifiPass.value.trim()) {
       alert('Please enter the network password'); wifiPass.focus(); return;
     }
-    connectBtn.classList.add('loading'); connectBtn.textContent = 'Connecting...'; connectBtn.disabled = true;
+    
+    connectBtn.classList.add('loading'); 
+    connectBtn.textContent = 'Connecting...'; 
+    connectBtn.disabled = true;
+    
     try {
       const resp = await apiPost('/api/wifi/connect', {
         ssid: selectedNetworkData.ssid,
         password: wifiPass.value
       });
+      
+      console.log('Connect response:', resp);
+      
       if (resp.success) {
         alert(`Connected to ${resp.ssid} — IP ${resp.ip}`);
       } else {
-        alert('Failed to connect (timeout or wrong password).');
+        alert('Failed to connect: ' + (resp.error || 'timeout or wrong password'));
       }
     } catch(e) {
       alert('Connect failed: ' + e.message);
+      console.error('Connect error:', e);
     } finally {
-      connectBtn.classList.remove('loading'); connectBtn.textContent = 'Connect Network'; connectBtn.disabled = false;
-      refreshStatus();
+      connectBtn.classList.remove('loading'); 
+      connectBtn.textContent = 'Connect Network'; 
+      connectBtn.disabled = false;
+      await refreshStatus();
     }
   }
 
   async function disconnectNetwork() {
-    if (!confirm('Disconnect from current WiFi?')) return;
+    if (!confirm('Disconnect from current WiFi network?')) return;
+    
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    disconnectBtn.classList.add('loading');
+    disconnectBtn.textContent = 'Disconnecting...';
+    disconnectBtn.disabled = true;
+    
     try {
-      await apiPost('/api/wifi/disconnect', {});
-      alert('Disconnected.');
+      const resp = await apiPost('/api/wifi/disconnect', {});
+      console.log('Disconnect response:', resp);
+      alert('Disconnected from WiFi network.');
     } catch (e) {
       alert('Disconnect failed: ' + e.message);
+      console.error('Disconnect error:', e);
     } finally {
-      refreshStatus();
+      disconnectBtn.classList.remove('loading');
+      disconnectBtn.textContent = 'Disconnect';
+      disconnectBtn.disabled = false;
+      await refreshStatus();
+      
+      // Clear the network selection
+      document.getElementById('networkSelect').value = '';
+      document.getElementById('wifiPass').value = '';
+      document.getElementById('signalIndicator').style.display = 'none';
+      document.getElementById('connectBtn').disabled = true;
+      selectedNetworkData = null;
     }
   }
 
@@ -737,17 +823,15 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
       const d = await apiGet('/api/load/gsm');
       document.getElementById('carrierName').value = d.carrierName || '';
       document.getElementById('apnSettings').value = d.apn || '';
-      // Optional extra fields if you add them:
-      // document.getElementById('apnUser').value = d.apnUser || '';
-      // document.getElementById('apnPass').value = d.apnPass || '';
     } catch (e) { console.warn('GSM load failed', e); }
   }
+  
   async function saveGsm() {
     try {
       await apiPost('/api/save/gsm', {
         carrierName: document.getElementById('carrierName').value,
         apn: document.getElementById('apnSettings').value,
-        apnUser: "",  // add fields if you show them
+        apnUser: "",
         apnPass: ""
       });
       alert('GSM settings saved.');
@@ -763,6 +847,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
       document.getElementById('userContact').value= d.phone || '';
     } catch (e) { console.warn('User load failed', e); }
   }
+  
   async function saveUser() {
     try {
       await apiPost('/api/save/user', {
@@ -776,21 +861,25 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
 
   // ---------- Wire up buttons on load ----------
   document.addEventListener('DOMContentLoaded', function() {
+    console.log('Dashboard loaded');
+    
     // Auto scan after 1s
     setTimeout(() => {
       const scanButton = document.querySelector('.btn-scan');
-      if (scanButton) scanButton.click();
+      if (scanButton) {
+        console.log('Starting auto scan...');
+        scanButton.click();
+      }
     }, 1000);
 
-    // Replace existing button actions to use API
-    // WiFi
+    // Wire up functions to global scope
     window.scanWifi = scanWifi;
     window.selectNetwork = selectNetwork;
     window.connectNetwork = connectNetwork;
     window.disconnectNetwork = disconnectNetwork;
     window.togglePassword = togglePassword;
 
-    // GSM buttons (find the Save / Refresh buttons in the GSM card):
+    // GSM buttons
     const gsmCard = document.querySelector('#gsm .card:nth-child(2)');
     if (gsmCard) {
       const [saveBtn, refreshBtn] = gsmCard.querySelectorAll('.button-row button');
@@ -815,7 +904,10 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
     loadGsm();
     loadUser();
 
-    // Simulated GSM CSQ ticker (optional visual)
+    // Refresh status every 10 seconds
+    setInterval(refreshStatus, 10000);
+
+    // Simulated GSM CSQ ticker
     setInterval(() => {
       const signalField = document.getElementById('signalDisplay');
       const signalStatus = document.getElementById('signalQuality');
